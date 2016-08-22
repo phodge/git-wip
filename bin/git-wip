@@ -1,0 +1,200 @@
+#!/usr/bin/env python
+import os.path
+import subprocess
+import sys
+
+
+CMD = os.path.basename(sys.argv[0])
+INDEX_DIFF = 'WIP.INDEX.diff'
+OTHER_DIFF = 'WIP.OTHER.diff'
+
+
+class FatalError(Exception):
+    pass
+
+
+def run(cmd, capture=False):
+    sys.stdout.write('> %s\n' % cmd)
+    if capture:
+        p = subprocess.Popen(
+            cmd, shell=True, universal_newlines=True, stdout=subprocess.PIPE)
+        outdata, errdata = p.communicate()
+        if p.returncode != 0:
+            raise FatalError(
+                "Non-zero exit status %d from %s" % (p.returncode, cmd))
+        lines = outdata.split("\n")
+        if lines[-1] == "":
+            lines = lines[0:-1]
+        return lines
+    try:
+        subprocess.check_call(cmd, shell=True)
+    except subprocess.CalledProcessError as err:
+        if err.output:
+            sys.stderr.write(err.output)
+        raise FatalError("Non-zero exit status %d:" % err.returncode)
+
+
+def get_current_branch():
+    cmd = 'git branch --no-color 2> /dev/null'
+    for line in run(cmd, True):
+        if line.startswith('* '):
+            return line[2:]
+    raise FatalError("Couldn't work out the git branch using: %s" % cmd)
+
+
+def is_ancestor(cid, possible_ancestor_cid):
+    '''is_ancestor()
+
+    Returns True if commit identified by `cid` is a descendant of the commit
+    identified by `possible_ancestor_cid`.
+    '''
+    lines = run(
+        'git merge-base %s %s' % (cid, possible_ancestor_cid), True)
+    if len(lines) == 1:
+        if lines[0] == possible_ancestor_cid:
+            return True
+    return False
+
+
+def get_cid_from_branch(branchname):
+    lines = run('git log %s -n 1 --format=%%H' % branchname, True)
+    assert len(lines) == 1
+    return lines[0]
+
+
+def branch_exists(branchname):
+    for line in run('git branch -a --no-color', True):
+        # strip of first 2 chars
+        assert line[0:2] in ('  ', '* ')
+        line = line[2:]
+        # get rid of any ' -> refs/xxx' parts
+        if ' -> ' in line:
+            line = line.split(' -> ')[0]
+        # strip 'remotes/' off the start
+        if line.startswith('remotes/'):
+            line = line[8:]
+        if line == branchname:
+            return True
+
+    return False
+
+
+def delete_local_branch(name, mustexist=True):
+    if not branch_exists(name):
+        if mustexist:
+            raise FatalError("Can't delete non-existant branch %s" % name)
+        return
+    run('git branch -D %s' % name)
+
+
+def main():
+    # abort if either of the .diff files already exist
+    for f in [f for f in [INDEX_DIFF, OTHER_DIFF] if os.path.exists(f)]:
+        msg = ("%s already exists! Please remove this file if you are certain"
+               "you don't need these changes.")
+        raise FatalError(msg % f)
+
+    # ensure this command is run in the root of the git repo
+    if not os.path.exists(os.path.join(os.getcwd(), '.git')):
+        raise FatalError(
+            "This command must be run from the root of your git repo")
+
+    curbranch = get_current_branch()
+
+    # if the current branch ends in .wip, we can't proceed
+    if curbranch.endswith('.WIP'):
+        raise FatalError(
+            "You can't use `git wip` on branch %s" % curbranch)
+
+    # run a git fetch first to ensure we are up-to-date with origin
+    run('git fetch origin --prune')
+
+    local_branch_cid = get_cid_from_branch(curbranch)
+
+    # does the origin have this branch already?
+    origin_has_branch = branch_exists('origin/%s' % curbranch)
+
+    if origin_has_branch:
+        # ensure the origin's branch is an ancestor of the current branch
+        origin_branch_cid = get_cid_from_branch('origin/%s' % curbranch)
+        if (
+                (not origin_branch_cid == local_branch_cid) and
+                (not is_ancestor(local_branch_cid, origin_branch_cid))):
+            msg = (
+                "Origin's '%s' (%s) is not an ancestor of "
+                "local '%s' (%s)" % (
+                    curbranch, origin_branch_cid, curbranch,
+                    local_branch_cid))
+            msg += ": Refusing to push"
+            raise FatalError(msg)
+
+    # if the .WIP branch exists locally, delete it
+    delete_local_branch('%s.WIP' % curbranch, False)
+
+    # make a patch file from the index
+    run('git diff --cached --no-renames > %s' % INDEX_DIFF)
+    if os.stat(INDEX_DIFF).st_size == 0:
+        # if there was nothing in the index, the patch file will be empty
+        # and we don't want it
+        os.unlink(INDEX_DIFF)
+    else:
+        # if there WAS something in the patch file, then we want use
+        # `patch` to remove the changes locally and destroy the index
+        run('patch -p1 -R < %s' % INDEX_DIFF)
+        run('git reset')
+
+    # add everything else to the now-empty index
+    run('git add .')
+    if os.path.exists(INDEX_DIFF):
+        run('git reset %s' % INDEX_DIFF)
+    # generate a new patch of all the other stuff
+    run('git diff --cached --no-renames > %s' % OTHER_DIFF)
+    run('patch -p1 -R < %s' % OTHER_DIFF)
+    run('git reset')
+
+    # commit all locally changed files (should now just be the two diffs)
+    run('git checkout -b %s.WIP' % curbranch)
+    run('git add .')
+    run('git commit -m "WIP on %s"' % curbranch)
+
+    if origin_has_branch:
+        # push the main branch
+        run('git push origin +%s:%s' % (curbranch, curbranch))
+    else:
+        # push the main branch (make sure it tracks upstream)
+        run('git push origin +%s:%s -u' % (curbranch, curbranch))
+
+    # if the remote WIP branch exists, make a backup of it and delete it
+    if branch_exists('origin/%s.WIP' % curbranch):
+        backupname = '%s.WIP.BACKUP' % curbranch
+        tryname = backupname
+        num = 1
+        while True:
+            if not branch_exists(tryname):
+                break
+            tryname = '%s-%d' % (backupname, num)
+            num += 1
+        run('git branch %s origin/%s.WIP --no-track' % (tryname, curbranch))
+        run('git push origin :%s.WIP' % curbranch)
+
+    # push the WIP branch also, don't worry about upstream tracking
+    run('git push origin +%s.WIP:%s.WIP' % (curbranch, curbranch))
+
+    # switch back to the original branch
+    run('git checkout %s' % curbranch)
+
+    # delete the local .WIP branch so it can't get confused
+    assert branch_exists('origin/%s.WIP' % curbranch)
+    local_cid = get_cid_from_branch('%s.WIP' % curbranch)
+    origin_cid = get_cid_from_branch('origin/%s.WIP' % curbranch)
+    assert local_cid == origin_cid
+    delete_local_branch('%s.WIP' % curbranch)
+
+    # show the git branch -va output so the user can confirm everything worked
+    sys.stdout.write('-' * 20)
+    sys.stdout.write('\n')
+    run('git branch -va --no-color | grep %s' % curbranch)
+
+
+if __name__ == '__main__':
+    main()

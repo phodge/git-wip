@@ -1,0 +1,144 @@
+#!/usr/bin/env python
+import os.path
+import sys
+import subprocess
+
+
+CMD = os.path.basename(sys.argv[0])
+INDEX_DIFF = 'WIP.INDEX.diff'
+OTHER_DIFF = 'WIP.OTHER.diff'
+
+
+class FatalError(Exception):
+    pass
+
+
+def run(cmd, capture=False):
+    sys.stdout.write('> %s\n' % cmd)
+    if capture:
+        p = subprocess.Popen(
+            cmd, shell=True, universal_newlines=True, stdout=subprocess.PIPE)
+        outdata, errdata = p.communicate()
+        if p.returncode != 0:
+            raise FatalError(
+                "Non-zero exit status %d from %s" % (p.returncode, cmd))
+        lines = outdata.split("\n")
+        if lines[-1] == "":
+            lines = lines[0:-1]
+        return lines
+    try:
+        subprocess.check_call(cmd, shell=True)
+    except subprocess.CalledProcessError as err:
+        if err.output:
+            sys.stderr.write(err.output)
+        raise FatalError("Non-zero exit status %d:" % err.returncode)
+
+
+def get_current_branch():
+    cmd = 'git branch --no-color 2> /dev/null'
+    for line in run(cmd, True):
+        if line.startswith('* '):
+            return line[2:]
+    raise FatalError("Couldn't work out the git branch using: %s" % cmd)
+
+
+def is_ancestor(cid, possible_ancestor_cid):
+    '''is_ancestor()
+
+    Returns True if commit identified by `cid` is a descendant of the commit
+    identified by `possible_ancestor_cid`.
+    '''
+    lines = run(
+        'git merge-base %s %s' % (cid, possible_ancestor_cid), True)
+    if len(lines) == 1:
+        if lines[0] == possible_ancestor_cid:
+            return True
+    return False
+
+
+def get_cid_from_branch(branchname):
+    lines = run('git log %s -n 1 --format=%%H' % branchname, True)
+    assert len(lines) == 1
+    return lines[0]
+
+
+def branch_exists(branchname):
+    for line in run('git branch -a --no-color', True):
+        # strip of first 2 chars
+        assert line[0:2] in ('  ', '* ')
+        line = line[2:]
+        # get rid of any ' -> refs/xxx' parts
+        if ' -> ' in line:
+            line = line.split(' -> ')[0]
+        # strip 'remotes/' off the start
+        if line.startswith('remotes/'):
+            line = line[8:]
+        if line == branchname:
+            return True
+
+    return False
+
+
+def main():
+    # abort if either of the .diff files already exist
+    for f in [f for f in [INDEX_DIFF, OTHER_DIFF] if os.path.exists(f)]:
+        msg = ("%s already exists! Please remove this file if you are certain"
+               "you don't need these changes.")
+        raise FatalError(msg % f)
+
+    # ensure this command is run in the root of the git repo
+    if not os.path.exists(os.path.join(os.getcwd(), '.git')):
+        raise FatalError(
+            "This command must be run from the root of your git repo")
+
+    files = run('git status --short', True)
+    if len(files):
+        raise FatalError(
+            "Cannot use %s while you have outstanding changes" % CMD)
+
+    curbranch = get_current_branch()
+    local_cid = get_cid_from_branch(curbranch)
+
+    for b in [curbranch, '%s.WIP' % curbranch]:
+        # ensure the remote branches exist
+        if not branch_exists('origin/%s' % b):
+            raise FatalError("Branch origin/%s not found" % b)
+
+        # ensure our current branch is an ancestor of both
+        origin_cid = get_cid_from_branch('origin/%s' % b)
+        if not is_ancestor(origin_cid, local_cid):
+            raise FatalError("Branch origin/%s is not descended from %s" %
+                             (b, curbranch))
+
+    # use git pull to get the latest changes
+    run('git pull')
+
+    # ensure the .WIP branch is a descendant of our new current cid
+    local_cid = get_cid_from_branch(curbranch)
+    WIP_cid = get_cid_from_branch('origin/%s.WIP' % curbranch)
+    if not is_ancestor(WIP_cid, local_cid):
+        raise FatalError("Branch origin/%s.WIP is not descended from %s" %
+                         (curbranch, curbranch))
+
+    # use git diff and patch to get the WIP changes
+    run('git diff origin/%s.WIP | patch -p1 -R' % curbranch)
+
+    # if the index file exists, use it to recreate the index
+    have_index = os.path.exists(INDEX_DIFF)
+    if have_index:
+        run('patch -p1 < %s' % INDEX_DIFF)
+        os.unlink(INDEX_DIFF)
+        run('git add .')
+
+    # if the OTHER_DIFF file exists, use it to recreate the other files
+    if os.path.exists(OTHER_DIFF):
+        if have_index:
+            # this file would've been added to the index already, so we need to
+            # remove it
+            run('git rm --cached %s' % OTHER_DIFF)
+        run('patch -p1 < %s' % OTHER_DIFF)
+        os.unlink(OTHER_DIFF)
+
+
+if __name__ == '__main__':
+    main()
