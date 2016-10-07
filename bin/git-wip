@@ -14,6 +14,9 @@ class FatalError(Exception):
 
 
 def run(cmd, capture=False):
+    # make sure 'patch' executable is available
+    subprocess.check_call(['which', 'patch'])
+
     sys.stdout.write('> %s\n' % cmd)
     if capture:
         p = subprocess.Popen(
