@@ -57,13 +57,13 @@ def is_ancestor(cid, possible_ancestor_cid):
 
 
 def get_cid_from_branch(branchname):
-    lines = run('git log %s -n 1 --format=%%H' % branchname, True)
+    lines = run('git log %s -n 1 --format=%%H --' % branchname, True)
     assert len(lines) == 1
     return lines[0]
 
 
 def branch_exists(branchname):
-    for line in run('git branch -a --no-color', True):
+    for line in run('git branch -a --no-color --', True):
         # strip of first 2 chars
         assert line[0:2] in ('  ', '* ')
         line = line[2:]
