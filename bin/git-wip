@@ -4,9 +4,14 @@ import subprocess
 import sys
 
 
-CMD = os.path.basename(sys.argv[0])
+CMD = os.path.basename(sys.argv.pop(0))
 INDEX_DIFF = 'WIP.INDEX.diff'
 OTHER_DIFF = 'WIP.OTHER.diff'
+
+if len(sys.argv):
+    REMOTE = sys.argv.pop(0)
+else:
+    REMOTE = 'origin'
 
 
 class FatalError(Exception):
@@ -110,16 +115,16 @@ def main():
             "You can't use `git wip` on branch %s" % curbranch)
 
     # run a git fetch first to ensure we are up-to-date with origin
-    run('git fetch origin --prune')
+    run('git fetch %s --prune' % REMOTE)
 
     local_branch_cid = get_cid_from_branch(curbranch)
 
     # does the origin have this branch already?
-    origin_has_branch = branch_exists('origin/%s' % curbranch)
+    origin_has_branch = branch_exists('%s/%s' % (REMOTE, curbranch))
 
     if origin_has_branch:
         # ensure the origin's branch is an ancestor of the current branch
-        origin_branch_cid = get_cid_from_branch('origin/%s' % curbranch)
+        origin_branch_cid = get_cid_from_branch('%s/%s' % (REMOTE, curbranch))
         if (
                 (not origin_branch_cid == local_branch_cid) and
                 (not is_ancestor(local_branch_cid, origin_branch_cid))):
@@ -162,13 +167,13 @@ def main():
 
     if origin_has_branch:
         # push the main branch
-        run('git push origin +%s:%s' % (curbranch, curbranch))
+        run('git push %s +%s:%s' % (REMOTE, curbranch, curbranch))
     else:
         # push the main branch (make sure it tracks upstream)
-        run('git push origin +%s:%s -u' % (curbranch, curbranch))
+        run('git push %s +%s:%s -u' % (REMOTE, curbranch, curbranch))
 
     # if the remote WIP branch exists, make a backup of it and delete it
-    if branch_exists('origin/%s.WIP' % curbranch):
+    if branch_exists('%s/%s.WIP' % (REMOTE, curbranch)):
         backupname = '%s.WIP.BACKUP' % curbranch
         tryname = backupname
         num = 1
@@ -177,19 +182,20 @@ def main():
                 break
             tryname = '%s-%d' % (backupname, num)
             num += 1
-        run('git branch %s origin/%s.WIP --no-track' % (tryname, curbranch))
-        run('git push origin :%s.WIP' % curbranch)
+        run('git branch %s %s/%s.WIP --no-track'
+            % (tryname, REMOTE, curbranch))
+        run('git push %s :%s.WIP' % (REMOTE, curbranch))
 
     # push the WIP branch also, don't worry about upstream tracking
-    run('git push origin +%s.WIP:%s.WIP' % (curbranch, curbranch))
+    run('git push %s +%s.WIP:%s.WIP' % (REMOTE, curbranch, curbranch))
 
     # switch back to the original branch
     run('git checkout %s' % curbranch)
 
     # delete the local .WIP branch so it can't get confused
-    assert branch_exists('origin/%s.WIP' % curbranch)
+    assert branch_exists('%s/%s.WIP' % (REMOTE, curbranch))
     local_cid = get_cid_from_branch('%s.WIP' % curbranch)
-    origin_cid = get_cid_from_branch('origin/%s.WIP' % curbranch)
+    origin_cid = get_cid_from_branch('%s/%s.WIP' % (REMOTE, curbranch))
     assert local_cid == origin_cid
     delete_local_branch('%s.WIP' % curbranch)
 
