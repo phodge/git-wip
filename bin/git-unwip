@@ -80,6 +80,13 @@ def branch_exists(branchname):
 
 
 def main():
+    if len(sys.argv) > 1:
+        remote = sys.argv[1]
+    else:
+        remote = 'origin'
+
+    sys.stdout.write("Using remote '{}'\n".format(remote))
+
     # abort if either of the .diff files already exist
     for f in [f for f in [INDEX_DIFF, OTHER_DIFF] if os.path.exists(f)]:
         msg = ("%s already exists! Please remove this file if you are certain"
@@ -101,27 +108,28 @@ def main():
 
     for b in [curbranch, '%s.WIP' % curbranch]:
         # ensure the remote branches exist
-        if not branch_exists('origin/%s' % b):
-            raise FatalError("Branch origin/%s not found" % b)
+        rb = '{}/{}'.format(remote, b)
+        if not branch_exists(rb):
+            raise FatalError("Branch {} not found".format(rb))
 
         # ensure our current branch is an ancestor of both
-        origin_cid = get_cid_from_branch('origin/%s' % b)
-        if not is_ancestor(origin_cid, local_cid):
-            raise FatalError("Branch origin/%s is not descended from %s" %
-                             (b, curbranch))
+        remote_cid = get_cid_from_branch(rb)
+        if not is_ancestor(remote_cid, local_cid):
+            raise FatalError("Branch {} is not descended from {}".format(
+                             rb, curbranch))
 
     # use git pull to get the latest changes
     run('git pull')
 
     # ensure the .WIP branch is a descendant of our new current cid
     local_cid = get_cid_from_branch(curbranch)
-    WIP_cid = get_cid_from_branch('origin/%s.WIP' % curbranch)
+    WIP_cid = get_cid_from_branch('{}/{}.WIP'.format(remote, curbranch))
     if not is_ancestor(WIP_cid, local_cid):
-        raise FatalError("Branch origin/%s.WIP is not descended from %s" %
-                         (curbranch, curbranch))
+        raise FatalError("Branch {}/{}.WIP is not descended from {}".format(
+                         remote, curbranch, curbranch))
 
     # use git diff and patch to get the WIP changes
-    run('git diff origin/%s.WIP | patch -p1 -R' % curbranch)
+    run('git diff %s/%s.WIP | patch -p1 -R' % (remote, curbranch))
 
     # if the index file exists, use it to recreate the index
     have_index = os.path.exists(INDEX_DIFF)
